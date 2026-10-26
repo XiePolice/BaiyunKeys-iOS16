@@ -7,7 +7,7 @@ struct RootView: View {
     }
 
     @EnvironmentObject private var store: AppStore
-@EnvironmentObject private var unlocker: UnlockService
+    @EnvironmentObject private var unlocker: UnlockService
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var tab: Tab = .home
@@ -151,7 +151,7 @@ struct RootView: View {
         rootToastDismissTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(1.8))
             guard !Task.isCancelled else { return }
-            withAnimation(.snappy) { rootToast = nil }
+            withAnimation(.easeInOut(duration: 0.25)) { rootToast = nil }
             rootToastDismissTask = nil
         }
     }
@@ -238,7 +238,7 @@ struct RootView: View {
         if store.showAutoFetch {
             guard configTapCount >= Self.tapsToHide else { return }
             configTapCount = 0
-            withAnimation(.snappy(duration: 0.28)) {
+            withAnimation(.easeInOut(duration: 0.25)) {
                 store.setAutoFetchVisible(false)
             }
             Haptics.notify(.success)
@@ -259,7 +259,7 @@ struct RootView: View {
             Haptics.notify(.error)
             return
         }
-        withAnimation(.snappy(duration: 0.28)) {
+        withAnimation(.easeInOut(duration: 0.25)) {
             store.setAutoFetchVisible(true)
         }
         Haptics.notify(.success)
