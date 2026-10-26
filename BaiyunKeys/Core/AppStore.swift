@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 /// 全局状态：门禁列表 + 偏好设置。
 final class AppStore: ObservableObject {
@@ -14,6 +15,8 @@ final class AppStore: ObservableObject {
         static let showAutoFetchAt = "showAutoFetchAt"
         static let fetchMethod = "fetchMethod"
         static let openId = "openId"
+        static let smPublicKey = "smPublicKey"
+        static let smPrivateKey = "smPrivateKey"
         static let theme = "theme"
         static let history = "unlockHistory"
         static let saveHistory = "saveHistory"
@@ -58,16 +61,21 @@ final class AppStore: ObservableObject {
     /// 「自动获取配置」显示状态的最长保留时间，超过则自动翻回隐藏。
     static let autoFetchTTL: TimeInterval = 24 * 60 * 60
 
-    /// 「自动获取配置」的两种通道。
+    /// 「自动获取配置」的三种通道。
     enum FetchMethod: String, CaseIterable, Identifiable {
+        /// 老接口：手机号 + 身份证号。目前官方端已停用。
         case idcard
+        /// 手机号 + 微信 OpenID（免身份证，走 xcx.pinganbaiyun.cn）。
         case openid
+        /// 手机号 + OpenID + 本地 SM2 密钥对（服务器加密下发，本机用私钥解）。
+        case openid_sm2
 
         var id: String { rawValue }
         var pickerLabel: String {
             switch self {
-            case .idcard: return "手机号 + 身份证"
-            case .openid: return "手机号 + OpenID（免身份证）"
+            case .idcard:     return "手机号 + 身份证（接口失效）"
+            case .openid:     return "手机号 + OpenID（免身份证）"
+            case .openid_sm2: return "手机号 + OpenID + SM2（加密版）"
             }
         }
     }
@@ -81,14 +89,9 @@ final class AppStore: ObservableObject {
     var current: DoorConfig? { state.current }
 
     /// 从首页「编辑」按钮跳转到配置页时，携带要打开编辑弹窗的门禁 ID。
-    /// 只在内存里存一次性的意图，不落盘；配置页读到后立刻清空。
     @Published var pendingEditDoorID: String?
 
     // MARK: - 偏好
-    //
-    // iOS 16 兼容：@Observable 的 access/withMutation 宏不可用，
-    // 改成 @Published + didSet 模式。存储属性必须初始化，所以先从
-    // UserDefaults 读初值，didSet 里写回。
 
     /// 列表中掩码显示 MAC 与 Key。
     @Published var hideSensitive: Bool {
@@ -153,7 +156,7 @@ final class AppStore: ObservableObject {
         return true
     }
 
-    /// 自动获取配置的方式：身份证号 / 微信 OpenID。
+    /// 自动获取配置的方式；默认 OpenID。
     @Published var fetchMethod: FetchMethod {
         didSet { defaults.set(fetchMethod.rawValue, forKey: Keys.fetchMethod) }
     }
@@ -164,6 +167,24 @@ final class AppStore: ObservableObject {
             let trimmed = openId.trimmingCharacters(in: .whitespaces)
             if trimmed != openId { openId = trimmed; return }
             defaults.set(openId, forKey: Keys.openId)
+        }
+    }
+
+    /// 加密版通道用的本地 SM2 公钥（hex，130 字符，04 开头）；本地记住。
+    @Published var smPublicKey: String {
+        didSet {
+            let trimmed = smPublicKey.trimmingCharacters(in: .whitespaces)
+            if trimmed != smPublicKey { smPublicKey = trimmed; return }
+            defaults.set(smPublicKey, forKey: Keys.smPublicKey)
+        }
+    }
+
+    /// 加密版通道用的本地 SM2 私钥（hex，64 字符）；本地记住，等同实体钥匙。
+    @Published var smPrivateKey: String {
+        didSet {
+            let trimmed = smPrivateKey.trimmingCharacters(in: .whitespaces)
+            if trimmed != smPrivateKey { smPrivateKey = trimmed; return }
+            defaults.set(smPrivateKey, forKey: Keys.smPrivateKey)
         }
     }
 
@@ -268,7 +289,6 @@ final class AppStore: ObservableObject {
     private let defaults = UserDefaults.standard
 
     init() {
-        // 先给所有 @Published 属性读初值，再加载门禁和历史。
         let d = UserDefaults.standard
 
         self.hideSensitive = d.object(forKey: Keys.hideSensitive) as? Bool ?? true
@@ -283,8 +303,10 @@ final class AppStore: ObservableObject {
                                Self.scanTimeoutRange.upperBound)
         self.showAutoFetch = d.object(forKey: Keys.showAutoFetch) as? Bool ?? false
         self.showAutoFetchAt = d.double(forKey: Keys.showAutoFetchAt)
-        self.fetchMethod = FetchMethod(rawValue: d.string(forKey: Keys.fetchMethod) ?? "") ?? .idcard
+        self.fetchMethod = FetchMethod(rawValue: d.string(forKey: Keys.fetchMethod) ?? "") ?? .openid
         self.openId = d.string(forKey: Keys.openId) ?? ""
+        self.smPublicKey = d.string(forKey: Keys.smPublicKey) ?? ""
+        self.smPrivateKey = d.string(forKey: Keys.smPrivateKey) ?? ""
         self.saveHistory = d.object(forKey: Keys.saveHistory) as? Bool ?? true
         self.haptics = d.object(forKey: Keys.haptics) as? Bool ?? true
         self.elderMode = d.object(forKey: Keys.elderMode) as? Bool ?? false
@@ -321,6 +343,7 @@ final class AppStore: ObservableObject {
         normalized.name = config.name.trimmingCharacters(in: .whitespaces)
 
         if let index = state.items.firstIndex(where: { $0.id == normalized.id }) {
+            // 保留已缓存的外设 UUID，除非关键参数变了
             if state.items[index].mac == normalized.mac, state.items[index].bluetoothName == normalized.bluetoothName {
                 normalized.cachedPeripheralID = state.items[index].cachedPeripheralID
             }
@@ -368,6 +391,7 @@ final class AppStore: ObservableObject {
             item.key = Hex.sanitizeKey(item.key)
             guard Hex.isValidMac(item.mac), Hex.isValidKey(item.key) else { continue }
             if let index = state.items.firstIndex(where: { $0.mac == item.mac && $0.key == item.key }) {
+                // 已存在：只补齐缺失的蓝牙名 / 名称
                 if state.items[index].bluetoothName.isEmpty { state.items[index].bluetoothName = item.bluetoothName }
                 if state.items[index].name.isEmpty { state.items[index].name = item.name }
             } else {
